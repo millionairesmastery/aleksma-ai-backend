@@ -273,9 +273,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Aleksma AI", version="1.0.0", lifespan=lifespan)
 
+_cors_raw = os.environ.get("CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] if _cors_raw != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
