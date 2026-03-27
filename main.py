@@ -18,6 +18,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from db import init_db, close_db, get_connection, put_connection
+from execution_backend import get_backend
 from executor import (
     compute_volume,
     execute_script,
@@ -1874,9 +1875,12 @@ async def get_part_topo_mesh(part_id: int):
             _mesh_lru.put(part_id, current_hash, mesh_cache)
             return mesh_cache
 
-        # Recompute
-        wp = execute_script(script)
-        mesh = shape_to_topo_mesh(wp)
+        # Recompute (via Modal if configured)
+        backend = get_backend()
+        exec_result = backend.execute_and_mesh(script, quality="preview")
+        if not exec_result.success:
+            raise ValueError("; ".join(exec_result.errors))
+        mesh = exec_result.mesh or {}
         mesh["id"] = part_id
 
         # Persist cache
@@ -1944,9 +1948,12 @@ async def get_part_topo_mesh_bin(part_id: int, quality: str = "preview"):
                 _mesh_lru.put(part_id, current_hash, mesh_cache)
                 return Response(content=_pack_binary_mesh(mesh_cache), media_type="application/octet-stream")
 
-        # 4. Recompute at requested quality
-        wp = execute_script(script)
-        mesh = shape_to_topo_mesh(wp, quality=quality)
+        # 4. Recompute at requested quality (via Modal if configured)
+        backend = get_backend()
+        exec_result = backend.execute_and_mesh(script, quality=quality)
+        if not exec_result.success:
+            raise ValueError("; ".join(exec_result.errors))
+        mesh = exec_result.mesh or {}
         mesh["id"] = part_id
 
         # Only persist preview/precise to DB cache (not draft)
@@ -6099,10 +6106,13 @@ async def update_parametric(part_id: int, body: ParametricUpdateRequest):
                 from parametric_templates import replay_script_with_params
                 new_script = replay_script_with_params(part_row[0], merged)
 
-            # Execute to validate and get bbox + mesh
-            wp_result = execute_script(new_script)
-            bbox = extract_bounding_box(wp_result)
-            mesh_result = shape_to_topo_mesh(wp_result)
+            # Execute to validate and get bbox + mesh (via Modal if configured)
+            backend = get_backend()
+            exec_result = backend.execute_and_mesh(new_script, quality="preview")
+            if not exec_result.success:
+                raise ValueError("; ".join(exec_result.errors))
+            bbox = exec_result.bbox or {}
+            mesh_result = exec_result.mesh or {}
             mesh_result["id"] = part_id
 
             # Update part
