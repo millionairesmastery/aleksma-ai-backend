@@ -8,7 +8,7 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc curl bzip2 libgl1-mesa-glx libglib2.0-0 \
+    libpq-dev gcc curl bzip2 libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install miniforge (conda) for CadQuery + OCP
