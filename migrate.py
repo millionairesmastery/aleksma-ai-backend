@@ -400,6 +400,10 @@ CREATE TABLE IF NOT EXISTS assembly_shares (
 );
 CREATE INDEX IF NOT EXISTS idx_assembly_shares_token ON assembly_shares(token);
 
+-- Soft-delete (archive) columns for parts
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
 -- Add user_id to chat_messages if missing
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id);
 -- Add mesh_cache and script_hash to parts if missing
