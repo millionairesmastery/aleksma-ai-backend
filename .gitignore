@@ -1,0 +1,19 @@
+# Environment variables (contain secrets)
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Modal
+.modal/
+
+# IDE
+.DS_Store
