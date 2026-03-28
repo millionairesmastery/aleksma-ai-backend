@@ -76,7 +76,8 @@ ALLOY_RIM_PARAMS = {
 
     # Spokes
     "spoke_count": {"label": "Spoke Count", "type": "int", "default": 5, "min": 3, "max": 12, "step": 1, "unit": "", "group": "Spokes"},
-    "spoke_width": {"label": "Spoke Width", "type": "float", "default": 32, "min": 15, "max": 80, "step": 1, "unit": "mm", "group": "Spokes"},
+    "spoke_width_outer": {"label": "Spoke Width (barrel)", "type": "float", "default": 45, "min": 15, "max": 100, "step": 1, "unit": "mm", "group": "Spokes"},
+    "spoke_width_inner": {"label": "Spoke Width (hub)", "type": "float", "default": 28, "min": 10, "max": 80, "step": 1, "unit": "mm", "group": "Spokes"},
     "spoke_depth": {"label": "Spoke Depth", "type": "float", "default": 22, "min": 10, "max": 40, "step": 1, "unit": "mm", "group": "Spokes"},
     "spoke_fillet": {"label": "Spoke Fillet", "type": "float", "default": 4, "min": 0, "max": 15, "step": 1, "unit": "mm", "group": "Spokes"},
 
@@ -103,13 +104,13 @@ def generate_alloy_rim(p: dict) -> str:
     width = p["rim_width_j"] * 25.4                  # between bead seats (mm)
     et = p.get("et_offset", 35)
     cb = p["center_bore"]
-    hub_r = p["hub_diameter"] / 2
     hub_t = p["hub_thickness"]
     n_bolts = int(p["bolt_count"])
     bolt_pcd_r = p["bolt_pcd"] / 2
     bolt_hole_d = p["bolt_hole_diameter"]
     n_spokes = int(p["spoke_count"])
-    spoke_w = p.get("spoke_width", p.get("spoke_width_outer", 32))
+    spoke_w_outer = p.get("spoke_width_outer", p.get("spoke_width", 45))
+    spoke_w_inner = p.get("spoke_width_inner", spoke_w_outer * 0.65)
     spoke_d = p.get("spoke_depth", p.get("spoke_thickness", 22))
     spoke_fillet = p.get("spoke_fillet", 4)
     bt = p["barrel_thickness"]
@@ -117,6 +118,10 @@ def generate_alloy_rim(p: dict) -> str:
     fh = p.get("flange_height", p.get("lip_height", 17.3))
     hh = p.get("hump_height", 1.8)
     valve_d = p.get("valve_hole_dia", 11.5)
+
+    # ── Hub diameter: must always cover the bolt circle + holes ──
+    min_hub_dia = bolt_pcd_r * 2 + bolt_hole_d + 6  # PCD + hole dia + 6mm margin
+    hub_r = max(p["hub_diameter"], min_hub_dia) / 2
 
     # ── Derived dimensions ──
     fw = 13.0                         # J-type flange width (standard)
@@ -126,13 +131,10 @@ def generate_alloy_rim(p: dict) -> str:
     total_w = width + 2 * fw          # total barrel width inc. flanges
     half_w = total_w / 2
 
-    # Spoke geometry
-    bolt_clear = bolt_pcd_r + bolt_hole_d / 2 + 3
-    spoke_inner_r = max(bolt_clear, hub_r * 0.7)
+    # Spoke geometry — spoke always starts INSIDE hub disc for solid connection
+    spoke_inner_r = hub_r * 0.5       # start well inside hub for overlap
     spoke_outer_r = well_r - bt + 3   # extend into barrel for clean union
     spoke_offset = 360.0 / n_bolts / 2 if n_spokes == n_bolts else 0
-    spoke_w_inner = spoke_w * 0.65    # narrower at hub end
-    spoke_w_outer = spoke_w
 
     # ── Barrel cross-section Z positions ──
     # Layout (inner → outer):
@@ -329,7 +331,7 @@ result = result.cut(valve_cutter)
 
     # Optional spoke edge fillet
     if spoke_fillet > 0:
-        sf = min(spoke_fillet, spoke_w * 0.2)
+        sf = min(spoke_fillet, spoke_w_inner * 0.3)
         script += f"""
 # ═══════════════════════════════════════════════════════════════════
 # 8. SPOKE FILLET — smooth spoke edges
