@@ -343,6 +343,10 @@ CREATE TABLE IF NOT EXISTS user_branch_state (
 CREATE INDEX IF NOT EXISTS idx_user_branch_state_part ON user_branch_state(part_id);
 CREATE INDEX IF NOT EXISTS idx_user_branch_state_user ON user_branch_state(user_id);
 
+-- Add branch_id to features table for per-branch feature trees
+ALTER TABLE features ADD COLUMN IF NOT EXISTS branch_id INT REFERENCES part_branches(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_features_branch ON features(branch_id);
+
 -- Track who created each branch and whether it has been merged
 ALTER TABLE part_branches ADD COLUMN IF NOT EXISTS created_by INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE part_branches ADD COLUMN IF NOT EXISTS is_merged BOOLEAN NOT NULL DEFAULT false;
