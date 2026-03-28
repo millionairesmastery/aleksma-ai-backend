@@ -6076,8 +6076,13 @@ async def get_project_thumbnail_mesh(project_id: int):
 
 
 @app.put("/parts/{part_id}/parametric")
-async def update_parametric(part_id: int, body: ParametricUpdateRequest):
-    """Update parametric params, regenerate script, rebuild mesh."""
+async def update_parametric(part_id: int, body: ParametricUpdateRequest, format: str = "json"):
+    """Update parametric params, regenerate script, rebuild mesh.
+
+    Pass ?format=bin to get a compact binary response (faster parsing).
+    Binary layout: same as _pack_binary_mesh, but the JSON header also
+    includes 'parametric_params' so the frontend has everything in one shot.
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -6139,6 +6144,13 @@ async def update_parametric(part_id: int, body: ParametricUpdateRequest):
             )
 
         conn.commit()
+
+        if format == "bin" and mesh_result:
+            mesh_result["parametric_params"] = merged
+            return Response(
+                content=_pack_binary_mesh(mesh_result),
+                media_type="application/octet-stream",
+            )
         return {"part_id": part_id, "mesh": mesh_result, "parametric_params": merged}
     except HTTPException:
         raise
