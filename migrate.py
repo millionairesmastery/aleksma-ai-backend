@@ -413,6 +413,14 @@ ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(
 -- Add mesh_cache and script_hash to parts if missing
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS mesh_cache JSONB;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS script_hash TEXT;
+
+-- Waitlist signups
+CREATE TABLE IF NOT EXISTS waitlist (
+    id          SERIAL PRIMARY KEY,
+    email       TEXT UNIQUE NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'landing',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

@@ -4273,13 +4273,25 @@ async def merge_branch(part_id: int, branch_id: int, user: UserInfo = Depends(ge
             )
 
             # Update part script to merged version (main branch canonical script)
-            cur.execute("SELECT feature_tree_mode FROM parts WHERE id=%s", (part_id,))
-            ftm = cur.fetchone()[0]
+            cur.execute("SELECT feature_tree_mode, parametric_type FROM parts WHERE id=%s", (part_id,))
+            ftm_row = cur.fetchone()
+            ftm = ftm_row[0]
+            has_parametric = ftm_row[1]
             if not ftm:
+                # Sync parametric_params from the merged script so inspector shows correct values
+                updated_params_sql = ""
+                updated_params_val = ()
+                if has_parametric and source_script:
+                    from parametric_templates import extract_script_params
+                    extracted = extract_script_params(source_script)
+                    if extracted:
+                        updated_params_sql = ", parametric_params=%s"
+                        updated_params_val = (_json.dumps(extracted),)
                 cur.execute(
-                    "UPDATE parts SET cadquery_script=%s, "
-                    "script_hash=NULL, mesh_cache=NULL, updated_at=now() WHERE id=%s",
-                    (source_script, part_id),
+                    "UPDATE parts SET cadquery_script=%s"
+                    + updated_params_sql +
+                    ", script_hash=NULL, mesh_cache=NULL, updated_at=now() WHERE id=%s",
+                    (source_script,) + updated_params_val + (part_id,),
                 )
 
             # Merge feature tree: replace main's features with branch's features
@@ -5854,7 +5866,77 @@ async def get_parametric_templates():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Template Library API (Canva-like template marketplace)
+# Waitlist (public, no auth)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class WaitlistRequest(BaseModel):
+    email: str
+    source: str = "landing"
+
+@app.post("/api/waitlist")
+async def join_waitlist(body: WaitlistRequest):
+    """Add an email to the waitlist and send confirmation email."""
+    import re
+    email = body.email.strip().lower()
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO waitlist (email, source) VALUES (%s, %s) ON CONFLICT (email) DO NOTHING RETURNING id",
+                (email, body.source or "landing"),
+            )
+            row = cur.fetchone()
+            is_new = row is not None
+        conn.commit()
+
+        # Send confirmation email for new signups
+        if is_new:
+            resend_key = os.environ.get("RESEND_API_KEY")
+            resend_from = os.environ.get("RESEND_FROM", "Aleksma AI <noreply@aleksma.ai>")
+            if resend_key:
+                try:
+                    import httpx
+                    httpx.post(
+                        "https://api.resend.com/emails",
+                        headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+                        json={
+                            "from": resend_from,
+                            "to": [email],
+                            "subject": "You're on the Aleksma AI waitlist!",
+                            "html": (
+                                "<div style='font-family: Inter, system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 40px 20px;'>"
+                                "  <h1 style='font-size: 24px; font-weight: 700; margin-bottom: 16px;'>Welcome to the waitlist!</h1>"
+                                "  <p style='font-size: 16px; line-height: 1.6; color: #444;'>"
+                                "    Thanks for signing up. We're building the future of engineering design "
+                                "    — AI-powered 3D CAD that runs entirely in your browser."
+                                "  </p>"
+                                "  <p style='font-size: 16px; line-height: 1.6; color: #444; margin-top: 16px;'>"
+                                "    We'll let you know as soon as early access is ready."
+                                "  </p>"
+                                "  <p style='font-size: 14px; color: #999; margin-top: 32px;'>"
+                                "    — The Aleksma AI Team<br>"
+                                "    <a href='https://aleksma.ai' style='color: #7D2AE8;'>aleksma.ai</a>"
+                                "  </p>"
+                                "</div>"
+                            ),
+                        },
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"[WAITLIST] Email send failed for {email}: {e}")
+
+        return {"ok": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        put_connection(conn)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Template Library API
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/template-categories")
@@ -6042,6 +6124,177 @@ async def get_template_preview_mesh(slug: str):
         raise HTTPException(status_code=500, detail=f"Mesh generation failed: {e}")
 
 
+# ── Library: add template / primitive to existing assembly ──────────────
+
+def _create_part_in_assembly(conn, assembly_id: int, name: str, script: str,
+                              parametric_type: Optional[str], parametric_params: Optional[dict]):
+    """Shared helper: execute script, mesh it, insert part row. Returns dict."""
+    # Execute script to get mesh + bbox
+    mesh = None
+    bbox = {}
+    try:
+        wp = execute_script(script)
+        mesh = shape_to_topo_mesh(wp)
+        bbox = extract_bounding_box(wp)
+    except Exception:
+        pass
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO parts (assembly_id, name, cadquery_script, parametric_type, parametric_params,
+                bbox_min_x, bbox_min_y, bbox_min_z, bbox_max_x, bbox_max_y, bbox_max_z,
+                mesh_cache, script_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            assembly_id, name, script,
+            parametric_type,
+            json.dumps(parametric_params) if parametric_params else None,
+            bbox.get("bbox_min_x"), bbox.get("bbox_min_y"), bbox.get("bbox_min_z"),
+            bbox.get("bbox_max_x"), bbox.get("bbox_max_y"), bbox.get("bbox_max_z"),
+            json.dumps(mesh) if mesh else None,
+            None,
+        ))
+        part_id = cur.fetchone()[0]
+    conn.commit()
+    return {"part_id": part_id, "name": name, "mesh": mesh}
+
+
+class AddFromTemplateRequest(BaseModel):
+    slug: str
+    params: Optional[dict] = None
+
+
+@app.post("/api/assemblies/{assembly_id}/add-from-template")
+async def add_template_to_assembly(assembly_id: int, body: AddFromTemplateRequest, user=Depends(get_current_user)):
+    """Add a part from a template into an existing assembly."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Verify assembly ownership
+            cur.execute("""
+                SELECT a.id FROM assemblies a
+                JOIN projects p ON p.id = a.project_id
+                WHERE a.id = %s AND p.user_id = %s
+            """, (assembly_id, user.id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Assembly not found")
+
+            # Look up template
+            cur.execute("SELECT generator_key, name, param_schema FROM templates WHERE slug = %s AND is_published = true", (body.slug,))
+            tpl_row = cur.fetchone()
+            if not tpl_row:
+                raise HTTPException(status_code=404, detail="Template not found")
+            generator_key, tpl_name, param_schema_raw = tpl_row
+
+            # Generate script with provided or default params
+            script = generate_from_template(generator_key, body.params or {})
+
+            # Build default params from schema
+            schema = param_schema_raw if isinstance(param_schema_raw, dict) else (json.loads(param_schema_raw) if param_schema_raw else {})
+            default_params = {k: v.get("default") for k, v in schema.items()}
+            final_params = {**default_params, **(body.params or {})}
+
+        result = _create_part_in_assembly(conn, assembly_id, tpl_name, script, generator_key, final_params)
+
+        # Increment use count
+        with conn.cursor() as cur:
+            cur.execute("UPDATE templates SET use_count = use_count + 1 WHERE slug = %s", (body.slug,))
+            conn.commit()
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        put_connection(conn)
+
+
+# Primitive shape script generators
+_PRIMITIVE_SCRIPTS = {
+    "box": lambda p: f"""import cadquery as cq
+result = cq.Workplane("XY").box({p.get('width', 50)}, {p.get('depth', 50)}, {p.get('height', 50)})
+""",
+    "cylinder": lambda p: f"""import cadquery as cq
+result = cq.Workplane("XY").cylinder(height={p.get('height', 50)}, radius={p.get('radius', 25)})
+""",
+    "sphere": lambda p: f"""import cadquery as cq
+result = cq.Workplane("XY").sphere(radius={p.get('radius', 25)})
+""",
+    "cone": lambda p: f"""import cadquery as cq
+import math
+R1 = {p.get('bottom_radius', 25)}
+R2 = {p.get('top_radius', 0)}
+H = {p.get('height', 50)}
+# Build cone via revolution of a trapezoidal profile
+pts = [(R1, 0), (R2, H), (0, H), (0, 0)]
+result = cq.Workplane("XZ").polyline(pts).close().revolve(360, (0, 0, 0), (0, 1, 0))
+""",
+    "tube": lambda p: f"""import cadquery as cq
+outer = cq.Workplane("XY").cylinder(height={p.get('height', 50)}, radius={p.get('outer_radius', 25)})
+inner = cq.Workplane("XY").cylinder(height={p.get('height', 50)} + 2, radius={p.get('inner_radius', 20)})
+result = outer.cut(inner)
+""",
+    "torus": lambda p: f"""import cadquery as cq
+result = cq.Workplane("XY").torus(majorRadius={p.get('major_radius', 30)}, minorRadius={p.get('minor_radius', 8)})
+""",
+    "hex_prism": lambda p: f"""import cadquery as cq
+result = cq.Workplane("XY").polygon(nSides=6, diameter={p.get('diameter', 30)}).extrude({p.get('height', 25)})
+""",
+    "wedge": lambda p: f"""import cadquery as cq
+W = {p.get('width', 50)}
+H = {p.get('height', 30)}
+D = {p.get('depth', 50)}
+pts = [(-W/2, 0), (W/2, 0), (W/2, H), (-W/2, 0)]
+result = cq.Workplane("XZ").polyline(pts).close().extrude(D, both=True)
+""",
+}
+
+
+class AddPrimitiveRequest(BaseModel):
+    shape: str
+    params: Optional[dict] = None
+    name: Optional[str] = None
+
+
+@app.post("/api/assemblies/{assembly_id}/add-primitive")
+async def add_primitive_to_assembly(assembly_id: int, body: AddPrimitiveRequest, user=Depends(get_current_user)):
+    """Add a basic primitive shape to an existing assembly."""
+    if body.shape not in _PRIMITIVE_SCRIPTS:
+        raise HTTPException(status_code=400, detail=f"Unknown shape: {body.shape}. Available: {list(_PRIMITIVE_SCRIPTS.keys())}")
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Verify assembly ownership
+            cur.execute("""
+                SELECT a.id FROM assemblies a
+                JOIN projects p ON p.id = a.project_id
+                WHERE a.id = %s AND p.user_id = %s
+            """, (assembly_id, user.id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Assembly not found")
+
+        params = body.params or {}
+        script = _PRIMITIVE_SCRIPTS[body.shape](params)
+        part_name = body.name or body.shape.replace('_', ' ').title()
+
+        result = _create_part_in_assembly(
+            conn, assembly_id, part_name, script,
+            f"primitive_{body.shape}", params
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        put_connection(conn)
+
+
 @app.get("/projects/{project_id}/thumbnail-mesh")
 async def get_project_thumbnail_mesh(project_id: int):
     """Return cached mesh of the first visible part in a project (for dashboard thumbnails)."""
@@ -6142,6 +6395,17 @@ async def update_parametric(part_id: int, body: ParametricUpdateRequest, format:
                 "UPDATE operations SET parameters = %s WHERE part_id = %s AND operation = 'raw_script'",
                 (_json.dumps({"script": new_script}), part_id),
             )
+
+            # Create version checkpoint for parametric change
+            try:
+                branch_id = _ensure_main_branch(cur, part_id)
+                # Build a short label from what changed
+                changed_keys = [k for k in body.parametric_params if existing.get(k) != body.parametric_params[k]]
+                label = f"Param: {', '.join(changed_keys[:3])}" if changed_keys else "Parameter update"
+                _create_version(cur, part_id, branch_id, new_script,
+                                label=label, author_type="human", auto=True)
+            except Exception:
+                pass  # version creation is non-critical — don't fail the rebuild
 
         conn.commit()
 
